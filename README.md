@@ -1,0 +1,2 @@
+Implementation of step 1 and step 2 in paper by [Valtolina et al. (2025)](http://dx.doi.org/10.1103/s3gy-km61) 
+using [Discovery (Vallisneri et al., 2025)](https://github.com/nanograv/discovery).
