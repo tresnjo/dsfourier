@@ -30,10 +30,11 @@ def fouriermodel(psrs, rn_components, rn_init_params, fixed_wn = True, ecorr = T
     
     expected_params = [p for p in inspect.signature(powerlaw).parameters if p not in ('f', 'df')]
 
-    if set(rn_init_params.keys()) != set(expected_params):
+    if rn_init_params and set(rn_init_params.keys()) != set(expected_params):
         raise ValueError(
             f"{powerlaw.__name__} expects the following params {expected_params} but instead got {list(rn_init_params.keys())}"
         )
+        
     
     if fixed_wn:
         pslmodels = [ds.PulsarLikelihood([psr.residuals,
@@ -49,7 +50,6 @@ def fouriermodel(psrs, rn_components, rn_init_params, fixed_wn = True, ecorr = T
                                         ds.makegp_fourier(psr, ds.partial(powerlaw, **rn_init_params),
                             rn_components, name='rednoise', T = Tspan)]) for psr in psrs]
         return pslmodels
-        
         
 def create_rn_keys(psrnames):
     rn_amp_keys = [f"{psr_name}_rednoise_log10_A" for psr_name in psrnames]
