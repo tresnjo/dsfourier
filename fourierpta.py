@@ -141,6 +141,20 @@ def phi_hd(rho, rn_components, gw_components, rn_amp_keys,
     
     return phi_inv, logdet_phi
 
+def phi_crn(rho, crn_components, rn_amp_keys, rn_gamma_keys,
+            crn_log10A_key, crn_gamma_key, getN_common, getN_curn):
+
+    dict_common = {k: rho[k] for k in rn_amp_keys + rn_gamma_keys}
+    dict_CRN    = {crn_log10A_key: rho[crn_log10A_key], crn_gamma_key: rho[crn_gamma_key]}
+
+    PhiN_rn  = getN_common(dict_common)  
+    PhiN_crn = getN_curn(dict_CRN)       
+
+    phi_diags = PhiN_rn.at[:, :2 * crn_components].add(PhiN_crn)  
+    logdet_phi = jnp.sum(jnp.log(phi_diags))
+    phi_inv = 1.0 / phi_diags
+
+    return phi_inv, logdet_phi
 
 def log_fourier_likelihood(rho, b, phi_func, TNT, log_const0):
 
