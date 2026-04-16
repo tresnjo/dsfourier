@@ -1,9 +1,14 @@
 import discovery as ds
 import matplotlib.pyplot as plt
+import os
+import pathlib
 import jax as jax
 import jax.numpy as jnp
 import jax.scipy as jsp
 import inspect
+import numpy as np
+from tqdm import tqdm
+import corner 
 
 def construct_freqs(psrs, num_frequencies):
     
@@ -14,62 +19,86 @@ def construct_freqs(psrs, num_frequencies):
     return T, f, df
 
 def phi_sp(rho, f, df, powerlaw):
-    
     phi1 = powerlaw(f, df, **rho).repeat(2) 
-    phi_inv_diag = 1.0 / phi1
-    phi_inv_stacked = jnp.diag(phi_inv_diag)
     
-    logdet_phi0 = jnp.sum(jnp.log(phi1)) 
+    phi_inv_diag = 1.0 / phi1
+    logdet_phi0 = jnp.sum(jnp.log(phi1))  
+    phi_inv_stacked = jnp.diag(phi_inv_diag)
     
     return phi_inv_stacked, logdet_phi0
 
 
-def fouriermodel(psrs, rn_components, rn_init_params, fixed_wn = True, ecorr = True, powerlaw = ds.flat_tail_powerlaw):
+def fouriermodel(psrs, rn_components, rn_init_params, fixed_wn=True, ecorr=True, powerlaw=ds.flat_tail_powerlaw):
 
     Tspan = ds.getspan(psrs)
-    
+
     expected_params = [p for p in inspect.signature(powerlaw).parameters if p not in ('f', 'df')]
 
-    if set(rn_init_params.keys()) != set(expected_params):
-        raise ValueError(
-            f"{powerlaw.__name__} expects the following params {expected_params} but instead got {list(rn_init_params.keys())}"
-        )
-    
+    if isinstance(rn_init_params, dict):
+        params_list = [rn_init_params] * len(psrs)
+    elif isinstance(rn_init_params, list):
+        if len(rn_init_params) != len(psrs):
+            raise ValueError(
+                f"rn_init_params list length ({len(rn_init_params)}) must match number of pulsars ({len(psrs)})"
+            )
+        params_list = rn_init_params
+    else:
+        params_list = [{}] * len(psrs)
+
+    for i, params in enumerate(params_list):
+        if params and set(params.keys()) != set(expected_params):
+            raise ValueError(
+                f"Pulsar {i}: {powerlaw.__name__} expects params {expected_params} but got {list(params.keys())}")
+
     if fixed_wn:
         pslmodels = [ds.PulsarLikelihood([psr.residuals,
-                                        ds.makegp_timing(psr, svd=True),
-                                        ds.makenoise_measurement(psr, noisedict = psr.noisedict, ecorr=ecorr),
-                                        ds.makegp_fourier(psr, ds.partial(powerlaw, **rn_init_params),
-                            rn_components, name='rednoise', T = Tspan)]) for psr in psrs]
-        return pslmodels
+                                          ds.makegp_timing(psr, svd=True),
+                                          ds.makenoise_measurement(psr, noisedict=psr.noisedict, ecorr=ecorr),
+                                          ds.makegp_fourier(psr, ds.partial(powerlaw, **params),
+                                                            rn_components, name='red_noise', T=Tspan)])
+                     for psr, params in zip(psrs, params_list)]
     else:
         pslmodels = [ds.PulsarLikelihood([psr.residuals,
-                                        ds.makegp_timing(psr, svd=True),
-                                        ds.makenoise_measurement(psr, ecorr=ecorr),
-                                        ds.makegp_fourier(psr, ds.partial(powerlaw, **rn_init_params),
-                            rn_components, name='rednoise', T = Tspan)]) for psr in psrs]
-        return pslmodels
-        
-        
+                                          ds.makegp_timing(psr, svd=True),
+                                          ds.makenoise_measurement(psr, ecorr=ecorr),
+                                          ds.makegp_fourier(psr, ds.partial(powerlaw, **params),
+                                                            rn_components, name='red_noise', T=Tspan)])
+                     for psr, params in zip(psrs, params_list)]
+
+    return pslmodels
+
 def create_rn_keys(psrnames):
-    rn_amp_keys = [f"{psr_name}_rednoise_log10_A" for psr_name in psrnames]
-    rn_gamma_keys = [f"{psr_name}_rednoise_gamma" for psr_name in psrnames]
+    rn_amp_keys = [f"{psr_name}_red_noise_log10_A" for psr_name in psrnames]
+    rn_gamma_keys = [f"{psr_name}_red_noise_gamma" for psr_name in psrnames]
     return rn_amp_keys, rn_gamma_keys
 
 
 def run_fourier_step(psrs, pslmodels, rn_components, rn_init_params, powerlaw,
                       fixed_wn=True, priordict=ds.priordict_standard, N=1000):
 
-    
     _, f, df = construct_freqs(psrs, num_frequencies=rn_components)
-    phi0_inv_single, logdet_phi0_single = phi_sp(rn_init_params, f, df, powerlaw)
 
-    b_stacked, sigma0_inv_blocks = [], []
+    if isinstance(rn_init_params, dict):
+        params_list = [rn_init_params] * len(psrs)
+    elif isinstance(rn_init_params, list):
+        if len(rn_init_params) != len(psrs):
+            raise ValueError(
+                f"rn_init_params list length ({len(rn_init_params)}) must match number of pulsars ({len(psrs)})")
+        params_list = rn_init_params
+    else:
+        params_list = [{}] * len(psrs)
+
+    phi0_inv_blocks, logdet_phi0 = [], 0.0
+    for params in params_list:
+        phi0_inv_i, logdet_phi0_i = phi_sp(params, f, df, powerlaw)
+        phi0_inv_blocks.append(phi0_inv_i)
+        logdet_phi0 += logdet_phi0_i
+
+    b_stacked, sigma0_inv_blocks, ahat0s = [], [], []
     quad0 = logdet_sigma0_inv = 0.0
 
     if fixed_wn:
         for psr_model in pslmodels:
-            print(f"Computing conditional for {psr_model.name}")
             ahat0, cf_inv = psr_model.conditional({})
 
             sigma0_inv_psr = cf_inv[0] @ cf_inv[0].T
@@ -80,23 +109,22 @@ def run_fourier_step(psrs, pslmodels, rn_components, rn_init_params, powerlaw,
 
             sigma0_inv_blocks.append(sigma0_inv_psr)
             b_stacked.append(b)
+            ahat0s.append(ahat0)
     else:
         for psr_model in pslmodels:
-            print(f"Sampling WNPs for {psr_model.name}")
-            wnp_dict = ds.sample_uniform(psr_model.logL.params, priordict, N)
-            
-            def single_step(wnp_i):
+            ahat_list, sigmas = [], []
+            for _ in tqdm(range(N), desc=f"Sampling wnps for {psr_model.name}"):
+                wnp_i = ds.sample_uniform(psr_model.logL.params, priordict)
                 ahat_i, cf_inv_i = psr_model.conditional(wnp_i)
-                sigma_i = jsp.linalg.cho_solve(
-                    (cf_inv_i[0], True), jnp.eye(cf_inv_i[0].shape[0])
-                )
-                return ahat_i, sigma_i
+                ahat_list.append(ahat_i)
 
-            ahat_array, sigmas = jax.vmap(single_step)(wnp_dict)
-        
+                cf_i = jsp.linalg.solve_triangular(
+                    cf_inv_i[0], jnp.eye(cf_inv_i[0].shape[0]), lower=True)
+                sigmas.append(cf_i @ cf_i.T)
+
+            ahat_array = jnp.stack(ahat_list)
             ahat0 = jnp.mean(ahat_array, axis=0)
-            # using law of total covariance, see: https://en.wikipedia.org/wiki/Law_of_total_covariance
-            sigma0 = jnp.mean(sigmas, axis=0) + jnp.cov(ahat_array.T, bias=False)
+            sigma0 = jnp.mean(jnp.stack(sigmas), axis=0) + jnp.cov(ahat_array.T, bias=False)
 
             chol_sigma0 = jnp.linalg.cholesky(sigma0)
             sigma0_inv_psr = jsp.linalg.cho_solve((chol_sigma0, True), jnp.eye(sigma0.shape[0]))
@@ -107,13 +135,29 @@ def run_fourier_step(psrs, pslmodels, rn_components, rn_init_params, powerlaw,
 
             sigma0_inv_blocks.append(sigma0_inv_psr)
             b_stacked.append(b)
+            ahat0s.append(ahat0)
 
     sigma0_inv = jsp.linalg.block_diag(*sigma0_inv_blocks)
-    phi0_inv = jsp.linalg.block_diag(*([phi0_inv_single] * len(pslmodels)))
+    phi0_inv = jsp.linalg.block_diag(*phi0_inv_blocks)
     b = jnp.concatenate(b_stacked, axis=0)
-    logdet_phi0 = len(pslmodels) * logdet_phi0_single
 
-    return b, sigma0_inv, phi0_inv, quad0, logdet_phi0, logdet_sigma0_inv
+    return ahat0s, b, sigma0_inv, phi0_inv, quad0, logdet_phi0, logdet_sigma0_inv
+
+
+def phi_crn(rho, crn_components, rn_amp_keys, rn_gamma_keys,
+            crn_log10A_key, crn_gamma_key, getN_common, getN_curn):
+
+    dict_common = {k: rho[k] for k in rn_amp_keys + rn_gamma_keys}
+    dict_CRN    = {crn_log10A_key: rho[crn_log10A_key], crn_gamma_key: rho[crn_gamma_key]}
+
+    PhiN_rn  = getN_common(dict_common)  
+    PhiN_crn = getN_curn(dict_CRN)       
+
+    phi_diags = PhiN_rn.at[:, :2 * crn_components].add(PhiN_crn)  
+    logdet_phi = jnp.sum(jnp.log(phi_diags))
+    phi_inv = 1.0 / phi_diags
+
+    return phi_inv, logdet_phi
 
 def phi_hd(rho, rn_components, gw_components, rn_amp_keys,
            rn_gamma_keys, gw_log10A_key, gw_gamma_key,
@@ -121,7 +165,7 @@ def phi_hd(rho, rn_components, gw_components, rn_amp_keys,
 
     dict_common = {k: rho[k] for k in rn_amp_keys + rn_gamma_keys}
     dict_GW    = {gw_log10A_key: rho[gw_log10A_key], gw_gamma_key: rho[gw_gamma_key]}
-
+    
     PhiN_rn = getN_common(dict_common)           
     phi_gw  = getN_hd(dict_GW)                  
 
@@ -132,34 +176,56 @@ def phi_hd(rho, rn_components, gw_components, rn_amp_keys,
     phi_cube = phi_rn_cube.at[:2*gw_components].add(phi_gw_cube) 
 
     phi_chol = jax.vmap(jnp.linalg.cholesky)(phi_cube)           
-    phi_inv_cube = jax.vmap(lambda L: jsp.linalg.cho_solve((L, True), jnp.eye(npsr)))(phi_chol)                                    
+    phi_inv_cube = jax.vmap(lambda L: jsp.linalg.cho_solve((L, True), jnp.eye(npsr)))(phi_chol)                                          
 
-    logdet_phi = 2.0*jnp.sum(jnp.log(jax.vmap(jnp.diag)(phi_chol)))
+    logdet_phi = 2.0 * jnp.sum(jnp.log(jax.vmap(jnp.diag)(phi_chol)))
     
     phi_inv_4d = jnp.einsum('fij,fg->ifjg', phi_inv_cube, jnp.eye(2*rn_components))
     phi_inv = phi_inv_4d.reshape(npsr * 2*rn_components, npsr * 2*rn_components)
     
     return phi_inv, logdet_phi
 
+def extract_rn_params(psrs, log10A_default = -13.0, gamma_default = 3.5):
+    '''
+    Extracts the IRN parameters from the noisedict.
+    If absent, IRN set to (log10A, gamma) = (-13, 3.5) as default.
+    '''
+    rn_params = []
+    for psr in psrs:
+        name = psr.name
+        if any('red_noise' in key for key in psr.noisedict):
+            if psr.noisedict[f'{name}_red_noise_gamma'] < 0:
+                gamma = -psr.noisedict[f'{name}_red_noise_gamma']
+            else:
+                gamma = psr.noisedict[f'{name}_red_noise_gamma']
+            rn_params.append({
+                'log10_A': psr.noisedict[f'{name}_red_noise_log10_A'],
+                'gamma':   gamma,
+            })
+        else:
+            rn_params.append({
+                'log10_A': log10A_default,
+                'gamma':   gamma_default,})
+    return rn_params
+
 
 def log_fourier_likelihood(rho, b, phi_func, TNT, log_const0):
 
     """
-    Fourier likelihood from equation (22) in https://arxiv.org/pdf/2412.11894.
+    Fourier likelihood corresponding to step 2 of Valtolina paper.
 
-    returns log L = log_const0 - 0.5 * log |Phi(rho)|
-                + 0.5 * log |Sigma(rho)|
+    returns log L = log_const0 - 0.5 * log|Phi(rho)|
+                + 0.5 * log|Sigma(rho)|
                 + 0.5 * b^T Sigma(rho) b
 
-    where Sigma(rho)^{-1} = Sigma_0^{-1}  - Phi_0^{-1} + Phi(rho)^{-1} 
-                          = TNT + Phi(rho)^{-1}.
+    with Sigma(rho)^{-1} = TNT + Phi(rho)^{-1}.
 
-    -rho:             Dictionary of hyperparams passed to phi_func (see next).
-    -phi_func:         Function which maps rho to tuple (Phi^{-1}, log|Phi|). Use
+    :rho:              Dict of hyperparameters passed to phi_func.
+    :b:                Vector Sigma_0^{-1} @ ahat_0 from step 1.
+    :phi_func:         Function mapping rho to tuple (\Phi^{-1}, log|Phi|). Use
                        ds.partial to fix all args except rho.
-    -b:                Vector Sigma_0^{-1} @ ahat_0 which is precomputed in step 1.
-    -TNT:              Sigma_0^{-1} - Phi_0^{-1} also precomputed from step 1
-    -log_const0:       Log constant precomputed from step 1 on the form
+    :TNT:              Sigma_0^{-1} - Phi_0^{-1} from step 1
+    :log_const0:       Log constant from step 1 
                        0.5 * (log|Sigma_0^{-1}| - ahat_0^T Sigma_0^{-1} ahat_0
                               + log|Phi_0|).
                               
@@ -169,13 +235,13 @@ def log_fourier_likelihood(rho, b, phi_func, TNT, log_const0):
     sigma_inv = TNT + phi_inv 
     
     L_sigma_inv = jnp.linalg.cholesky(sigma_inv)  
-    L_sigma_b = jsp.linalg.solve_triangular(L_sigma_inv, b, lower=True) # = L_sigma @ Sigma_0^{-1} @ ahat_0
+    L_sigma_b = jsp.linalg.solve_triangular(L_sigma_inv, b, lower=True)
     logdet_sigma_inv = 2.0 * jnp.sum(jnp.log(jnp.diag(L_sigma_inv)))
-    quad = L_sigma_b.T @ L_sigma_b # = ahat_0^T \Sigma_0^{-1}^T \Sigma \Sigma_0^{-1} ahat_0
+    quad = L_sigma_b.T @ L_sigma_b
     
-    logN_diffs = - 0.5*logdet_sigma_inv + 0.5*quad
+    logN_diffs = - 0.5 * logdet_sigma_inv + 0.5 * quad
                                                                
-    logdet_ratio  = - 0.5 *logdet_phi 
+    logdet_ratio  = - 0.5 *  logdet_phi 
     
     return logN_diffs + logdet_ratio + log_const0
 
