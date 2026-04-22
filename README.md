@@ -7,7 +7,7 @@ Under `flow/`, there are currently three files:
 
 
 
-1. `sp\_flow.ipynb` which implements the flow-corrected posterior under fixed white noise and RN hyperparameters
-2. `sp\_flow\_wn.ipynb` which implements flow-corrected posterior marginalizing over white noise but fixed RN hyperparameters
-3. `sp\_flow\_eta.ipynb` which is first attempt of implementing flow-corrected with varying RN hyperparameters
+1. `sp_flow.ipynb` which implements the flow-corrected posterior under fixed white noise and RN hyperparameters
+2. `sp_flow_wn.ipynb` which implements flow-corrected posterior marginalizing over white noise but fixed RN hyperparameters
+3. `sp_flow_eta.ipynb` which is first attempt of implementing flow-corrected with varying RN hyperparameters
 
