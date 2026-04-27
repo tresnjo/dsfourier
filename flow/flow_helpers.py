@@ -17,10 +17,11 @@ import discovery as ds
 import discovery.flow as dsf
 from flowjax.flows import masked_autoregressive_flow
 from flowjax.distributions import StandardNormal
-# from flowjax.train import fit_to_data (will be needed for WN marginalized result)
+from flowjax.train import fit_to_data
 
 newdict = {'(.*_)?red_noise_coefficients\\(([0-9]*)\\)': [-100, 100]}
 
+import re
 def simple_dict_transformation(func,priordict=newdict):
     """change from dictionary as input to list of arrays as input
 
@@ -73,9 +74,9 @@ def simple_dict_transformation(func,priordict=newdict):
         len_hyper = len(hyper_pars)
 
         if len_hyper > 0:
-            ys_hyper = ys[-len_hyper:]
-            xs_hyper = 0.5 * (b[-len_hyper:] + a[-len_hyper:] + 
-                            (b[-len_hyper:] - a[-len_hyper:]) * jnp.tanh(ys_hyper))
+            ys_hyper = ys[:len_hyper]
+            xs_hyper = 0.5 * (b[:len_hyper] + a[:len_hyper] + 
+                            (b[:len_hyper] - a[:len_hyper]) * jnp.tanh(ys_hyper))
             hyper_jacobian = jnp.sum(jnp.log(2.0) - 2.0 * jnp.logaddexp(ys_hyper, -ys_hyper))
             hyper_dict = dict(zip(hyper_pars, jnp.array(xs_hyper).T))
         else:
@@ -93,14 +94,18 @@ def simple_dict_transformation(func,priordict=newdict):
     def transformed(ys, ahat, L):
         mydict, jac = to_dict_and_jacobian(ys, ahat, L)
         return func(mydict) + jac
+    
     transformed.params = func.params
     transformed.to_dict_and_jacobian = to_dict_and_jacobian
+    transformed.a_bounds = a
+    transformed.b_bounds = b
+    transformed.columns = columns
+    
     return transformed
 
-
-def mcmc_rnwn(logL_test, ahat0, L0, a_hyper, b_hyper, low, high):
+def model_rn_wn(logL_test, ahat0, L0, a_hyper, b_hyper, low, high):
     
-    xs_hyper = numpyro.sample("eta", dist.Uniform(low, high))
+    xs_hyper = numpyro.sample("theta", dist.Uniform(low, high))
     y_hyper  = jnp.arctanh((2.0 * xs_hyper - b_hyper - a_hyper) / (b_hyper - a_hyper))
 
     xi = numpyro.sample("xi", dist.Normal(jnp.zeros(60), jnp.ones(60)))
@@ -110,44 +115,57 @@ def mcmc_rnwn(logL_test, ahat0, L0, a_hyper, b_hyper, low, high):
     loglik = logL_test(ys, ahat0, L0) + 0.5 * jnp.dot(xi, xi)
     numpyro.factor("logL", loglik)
     
-    
-def fit_MAF_flow(logx, ahat0, L, num_samples, num_params, rng,
-                 annealing_schedule = lambda i: min(1.0, 0.5 + 0.5*i/25)):
-    
-    logx_partial = jax.jit(ds.partial(logx, ahat=ahat0, L=L))
-    
-    loss = dsf.value_and_grad_ElboLoss(logx_partial, num_samples=num_samples)
-    flow_key, train_key = jax.random.split(rng, 2)
-    
-    flow = masked_autoregressive_flow(flow_key,base_dist=StandardNormal((num_params,)),
-                                      flow_layers=2, nn_width=16, nn_depth=4,
-                                      invert=True)  # using invert = True
-                    # which allows for faster logprob evaluation,
-                    # see https://danielward27.github.io/flowjax/api/flows.html
-    
-    trainer = dsf.VariationalFit(dist=flow, loss_fn=loss, multibatch=1,
-                             learning_rate=1e-2, annealing_schedule=annealing_schedule,
-                             show_progress=True)
-    
-    train_key, trained_flow = trainer.run(train_key, steps=1001)
-    return train_key, trained_flow, trainer
+def sample_rn_wn(logx, ahat0, L0):
 
-def fit_flows(pslmodels, logxs, ahat0_list, Ls, num_samples, num_params, rng):
+    coeff_pars = [p for p in logx.params if "coefficients" in p]
+    n_xi = int(coeff_pars[0].split('(')[1].rstrip(')'))
     
+    hyper_pars = [p for p in logx.params if "coefficients" not in p]
+    init_params = {"theta": jnp.array([1.0 if "efac" in p else -7.0 for p in hyper_pars]),
+                    "xi":  jnp.zeros(n_xi)}
+    hyper_indices = jnp.array([logx.columns.index(p) for p in hyper_pars])
+    
+    a_hyper = logx.a_bounds[hyper_indices]
+    b_hyper = logx.b_bounds[hyper_indices]
+    
+    # TODO: read in bounds from prior instead of hardcoding
+    low = jnp.array([0.9 if "efac" in p else -8.5 for p in hyper_pars])
+    high = jnp.array([1.1 if "efac" in p else -5.0 for p in hyper_pars])
+
+    def model():
+        xs_hyper = numpyro.sample("theta", dist.Uniform(low, high))
+        y_hyper = jnp.arctanh((2.0 * xs_hyper - b_hyper - a_hyper) / (b_hyper - a_hyper))
+
+        xi = numpyro.sample("xi", dist.Normal(jnp.zeros(n_xi), jnp.ones(n_xi)))
+        numpyro.deterministic("a", ahat0 + L0 @ xi)
+
+        ys = jnp.concatenate([xi, y_hyper])
+        loglik = logx(ys, ahat0, L0) + 0.5 * jnp.dot(xi, xi)
+        numpyro.factor("logL", loglik)
+        
+    return model, init_params
+    
+def fit_flows(pslmodels, logxs, ahat0_list, Ls, num_samples, rng,
+              flow, annealing_schedule=lambda i: min(1.0, 0.5 + 0.5*i/25)):
+
     trained_flows, train_keys = [], []
-    
+
     for i in range(len(pslmodels)):
         print(f"Fitting flow for pulsar {pslmodels[i].name}")
         rng, subkey = jax.random.split(rng)
-        train_key, trained_flow, trainer = fit_MAF_flow(
-            logxs[i], ahat0_list[i], Ls[i],
-            num_samples, num_params, subkey)
+
+        logx_partial = jax.jit(ds.partial(logxs[i], ahat=ahat0_list[i], L=Ls[i]))
+        loss = dsf.value_and_grad_ElboLoss(logx_partial, num_samples=num_samples)
+
+        trainer = dsf.VariationalFit(dist=flow, loss_fn=loss, multibatch=1,
+                                     learning_rate=1e-2, annealing_schedule=annealing_schedule,
+                                     show_progress=True)
+
+        train_key, trained_flow = trainer.run(subkey, steps=1001)
         trained_flows.append(trained_flow)
         train_keys.append(train_key)
-        
+
     return trained_flows, train_keys
-
-
 def gauss_approx_flow_mpsrs(trained_flows, train_keys, ahat0_list, Ls,
                              num_flow_samples=100000):
 
@@ -179,10 +197,12 @@ def eval_flow_quantity_mpsrs(ahat_f, Sigma_f, L_f):
         logdet_sigma_flow_inv = -2.0 * jnp.sum(jnp.log(jnp.diag(L_f_i)))
         b_flow = Sigma_f_inv @ ahat_f_i
         quad_f = ahat_f_i @ b_flow
+        
         return Sigma_f_inv, logdet_sigma_flow_inv, b_flow, quad_f
 
     results = [eval_flow_quantities(ahat_f[i], Sigma_f[i], L_f[i])
                for i in range(ahat_f.shape[0])]
+    
     return (jnp.stack([r[0] for r in results]), jnp.stack([r[1] for r in results]),
             jnp.stack([r[2] for r in results]), jnp.stack([r[3] for r in results]))
 
@@ -195,16 +215,18 @@ def TtNT_mpsrs(Sigma_f_inv, params_list, f, df, powerlaw):
         return TNT_flow, logdet_phi0
 
     TNT_list, logdet_phi0_total = [], 0.0
+    
     for i, params in enumerate(params_list):
         TNT, logdet_phi0 = compute_TNT_flow(Sigma_f_inv[i], params)
         TNT_list.append(TNT)
         logdet_phi0_total += logdet_phi0
+        
     return jnp.stack(TNT_list), logdet_phi0_total
 
 
 def make_model_crn_flow(b, phi, log_const, TNT, npsr, rn_components,
                         rn_amp_keys, rn_gamma_keys, crn_log10A_key, crn_gamma_key,
-                        logL_flow_list, ahat_0, L_0, ahat_f, L_sigma_f):
+                        ahat_0, L_0, ahat_f, L_sigma_f, logL_flow_list,):
     
     # checking shapes so that computations can be batched over psrs
     if TNT.shape != (npsr, 2 * rn_components, 2 * rn_components):
@@ -226,6 +248,7 @@ def make_model_crn_flow(b, phi, log_const, TNT, npsr, rn_components,
         L_0 = L_0.reshape(npsr, 2 * rn_components, npsr, 2 * rn_components).diagonal(axis1=0, axis2=2).transpose(2, 0, 1)
 
     def model_crn():
+        # TODO: same here, read in bounds from prior instead of hardcoding
         etas = {}
         for k in rn_amp_keys:
             etas[k] = numpyro.sample(k, dist.Uniform(-20, -11))
@@ -234,13 +257,16 @@ def make_model_crn_flow(b, phi, log_const, TNT, npsr, rn_components,
         etas[crn_log10A_key] = numpyro.sample(crn_log10A_key, dist.Uniform(-20, -11))
         etas[crn_gamma_key]  = numpyro.sample(crn_gamma_key,  dist.Uniform(0, 7))
 
+
         xis = numpyro.sample("xi", dist.Normal(jnp.zeros((npsr, 2 * rn_components)),
                                         jnp.ones((npsr, 2 * rn_components))))
 
         phi_inv_diags, logdet_phi = phi(etas)
         sigma_inv = TNT + jax.vmap(jnp.diag)(phi_inv_diags)
         L_sinv = jax.vmap(jnp.linalg.cholesky)(sigma_inv)
+        
         ahat = jax.vmap(lambda l0, bv: jsp.linalg.cho_solve((l0, True), bv))(L_sinv, b)
+        
         Sigma = jax.vmap(lambda l0: jsp.linalg.cho_solve((l0, True), jnp.eye(2 * rn_components)))(L_sinv)
         L_sigma = jax.vmap(jnp.linalg.cholesky)(Sigma)
 
@@ -251,6 +277,7 @@ def make_model_crn_flow(b, phi, log_const, TNT, npsr, rn_components,
         logL = 0.5 * quad_b - 0.5 * logdet_phi + log_const + log_det_L
         numpyro.factor("logL", logL)
 
+        # flow-correction part
         a_diff_0 = a - ahat_0
         y = jax.vmap(lambda l, r: jsp.linalg.solve_triangular(l, r, lower=True))(L_0, a_diff_0)
         numpyro.deterministic("y", y)

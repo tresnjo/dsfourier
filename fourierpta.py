@@ -1,10 +1,13 @@
 import discovery as ds
 import matplotlib.pyplot as plt
+
 import os
 import pathlib
+
 import jax as jax
 import jax.numpy as jnp
 import jax.scipy as jsp
+
 import inspect
 import numpy as np
 from tqdm import tqdm
@@ -19,16 +22,27 @@ def construct_freqs(psrs, num_frequencies):
     return T, f, df
 
 def phi_sp(rho, f, df, powerlaw):
-    phi1 = powerlaw(f, df, **rho).repeat(2) 
     
-    phi_inv_diag = 1.0 / phi1
-    logdet_phi0 = jnp.sum(jnp.log(phi1))  
-    phi_inv_stacked = jnp.diag(phi_inv_diag)
-    
-    return phi_inv_stacked, logdet_phi0
+    if powerlaw == ds.powerlaw or powerlaw == ds.flat_tail_powerlaw: 
+        phi1 = powerlaw(f, df, **rho).repeat(2) 
+        
+        phi_inv_diag = 1.0 / phi1
+        logdet_phi0 = jnp.sum(jnp.log(phi1))  
+        phi_inv_stacked = jnp.diag(phi_inv_diag)
+        
+        return phi_inv_stacked, logdet_phi0
 
+    elif powerlaw == ds.freespectrum:
+        # NOTE: no .repeat(2) needed
+        phi1 = powerlaw(f, df, **rho)  # this already returns (2*rn_components unlike ds.powerlaw)
+        
+        phi_inv_diag = 1.0 / phi1
+        logdet_phi0 = jnp.sum(jnp.log(phi1))  
+        phi_inv_stacked = jnp.diag(phi_inv_diag)
+        
+        return phi_inv_stacked, logdet_phi0
 
-def fouriermodel(psrs, rn_components, rn_init_params, fixed_wn=True, ecorr=True, powerlaw=ds.flat_tail_powerlaw):
+def fouriermodel(psrs, rn_components, rn_init_params, fixed_wn=True, tnequad = False, ecorr=False, powerlaw=ds.flat_tail_powerlaw):
 
     Tspan = ds.getspan(psrs)
 
@@ -53,7 +67,7 @@ def fouriermodel(psrs, rn_components, rn_init_params, fixed_wn=True, ecorr=True,
     if fixed_wn:
         pslmodels = [ds.PulsarLikelihood([psr.residuals,
                                           ds.makegp_timing(psr, svd=True),
-                                          ds.makenoise_measurement(psr, noisedict=psr.noisedict, ecorr=ecorr),
+                                          ds.makenoise_measurement(psr, noisedict=psr.noisedict, tnequad = tnequad, ecorr=ecorr),
                                           ds.makegp_fourier(psr, ds.partial(powerlaw, **params),
                                                             rn_components, name='red_noise', T=Tspan)])
                      for psr, params in zip(psrs, params_list)]
@@ -77,7 +91,7 @@ def run_fourier_step(psrs, pslmodels, rn_components, rn_init_params, powerlaw,
                       fixed_wn=True, priordict=ds.priordict_standard, N=1000):
 
     _, f, df = construct_freqs(psrs, num_frequencies=rn_components)
-
+        
     if isinstance(rn_init_params, dict):
         params_list = [rn_init_params] * len(psrs)
     elif isinstance(rn_init_params, list):
@@ -142,6 +156,27 @@ def run_fourier_step(psrs, pslmodels, rn_components, rn_init_params, powerlaw,
     b = jnp.concatenate(b_stacked, axis=0)
 
     return ahat0s, b, sigma0_inv, phi0_inv, quad0, logdet_phi0, logdet_sigma0_inv
+
+def compute_zero_quantities(pslmodels, psr_noisedicts):
+
+    # NOTE: this is really just the run_fourier_step for fixed_wn but with fewer computations
+    Ls, ahat0_list = [], []
+    logdet_sigma0_inv = 0.0
+
+    for psr_model, noisedict in zip(pslmodels, psr_noisedicts):
+
+        ahat0, cf_inv = psr_model.conditional(noisedict)
+
+        logdet_sigma0_inv += 2.0 * jnp.sum(jnp.log(jnp.diag(cf_inv[0])))
+
+        sigma0_psr = jsp.linalg.cho_solve((cf_inv[0], True), jnp.eye(cf_inv[0].shape[0]))
+        L_sigma0 = jsp.linalg.cholesky(sigma0_psr, lower=True)
+
+        Ls.append(L_sigma0)
+        ahat0_list.append(ahat0)
+
+    return Ls, ahat0_list, logdet_sigma0_inv
+            
 
 
 def phi_crn(rho, crn_components, rn_amp_keys, rn_gamma_keys,
@@ -244,5 +279,3 @@ def log_fourier_likelihood(rho, b, phi_func, TNT, log_const0):
     logdet_ratio  = - 0.5 *  logdet_phi 
     
     return logN_diffs + logdet_ratio + log_const0
-
-
