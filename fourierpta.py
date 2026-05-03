@@ -131,10 +131,11 @@ def run_fourier_step(psrs, pslmodels, rn_components, rn_init_params, powerlaw,
                 wnp_i = ds.sample_uniform(psr_model.logL.params, priordict)
                 ahat_i, cf_inv_i = psr_model.conditional(wnp_i)
                 ahat_list.append(ahat_i)
-
-                cf_i = jsp.linalg.solve_triangular(
-                    cf_inv_i[0], jnp.eye(cf_inv_i[0].shape[0]), lower=True)
-                sigmas.append(cf_i @ cf_i.T)
+                cf_inv_i = cf_inv_i[0]
+                
+                sigma_inv = cf_inv_i @ cf_inv_i.T
+                sigma = jnp.linalg.inv(sigma_inv)
+                sigmas.append(sigma)
 
             ahat_array = jnp.stack(ahat_list)
             ahat0 = jnp.mean(ahat_array, axis=0)
@@ -279,3 +280,75 @@ def log_fourier_likelihood(rho, b, phi_func, TNT, log_const0):
     logdet_ratio  = - 0.5 *  logdet_phi 
     
     return logN_diffs + logdet_ratio + log_const0
+
+### NEW - for finding optimal eta
+def make_marginalized_log_posterior(TtNT, b_0, phi_crn_partial, rn_amp_keys, rn_gamma_keys,
+                       crn_log10A_key, crn_gamma_key, n_crn_grid=10):
+    
+    # returns the CRN marginalized log posterior for RN hyperparameters 
+    # (works for single pulsar only as of currently)
+    # marginalization is performed numerically using grid
+    crn_log10A_grid = jnp.linspace(-20.0, -11.0, n_crn_grid)
+    crn_gamma_grid  = jnp.linspace(0.0, 7.0, n_crn_grid)
+    crna_mesh, crng_mesh = jnp.meshgrid(crn_log10A_grid, crn_gamma_grid, indexing='ij')
+    crn_points = jnp.stack([crna_mesh.ravel(), crng_mesh.ravel()], axis=1)
+
+    def log_posterior(irn_log10A, irn_gamma):
+
+        def log_p_at_crn(crn_params):
+            crn_log10A, crn_gamma = crn_params[0], crn_params[1]
+            etas = {}
+            for k in rn_amp_keys:
+                etas[k] = irn_log10A
+            for k in rn_gamma_keys:
+                etas[k] = irn_gamma
+            etas[crn_log10A_key] = crn_log10A
+            etas[crn_gamma_key] = crn_gamma
+
+            phi_inv_diags, logdet_phi = phi_crn_partial(etas)
+            phi_inv_diag = phi_inv_diags[0] # NOTE: assumes single pulsar
+
+            Sigma_inv = TtNT + jnp.diag(phi_inv_diag)
+            L_inv = jnp.linalg.cholesky(Sigma_inv)
+            log_det_Sigma = -2.0 * jnp.sum(jnp.log(jnp.diag(L_inv)))
+            mu = jsp.linalg.cho_solve((L_inv, True), b_0)
+            quad_b = b_0 @ mu
+
+            return 0.5*quad_b + 0.5*log_det_Sigma - 0.5*logdet_phi
+
+        log_p_crn = jax.lax.map(log_p_at_crn, crn_points)
+        return jax.scipy.special.logsumexp(log_p_crn)
+
+    return log_posterior
+
+
+def eta_MAP(log_posterior, log10A_bounds=(-20.0, -11.0),
+                      gamma_bounds=(0.0, 7.0), n_grid=10, 
+                      steps=4, zoom=0.3):
+    
+    log10A_lo, log10A_hi = log10A_bounds
+    gamma_lo, gamma_hi  = gamma_bounds
+
+    for i in range(steps):
+        log10A_grid = jnp.linspace(log10A_lo, log10A_hi, n_grid)
+        gamma_grid = jnp.linspace(gamma_lo,  gamma_hi,  n_grid)
+
+        gmesh,ampmesh = jnp.meshgrid(gamma_grid, log10A_grid, indexing='ij')
+        points_gamma = gmesh.ravel()
+        points_log10A = ampmesh.ravel()
+
+        log_p_vals = jax.vmap(log_posterior)(points_log10A, points_gamma)
+
+        idx = jnp.argmax(log_p_vals)
+        gamma_map = float(points_gamma[idx])
+        log10A_map = float(points_log10A[idx])
+        
+        gamma_range = (gamma_hi  - gamma_lo) * zoom
+        log10A_range = (log10A_hi - log10A_lo) * zoom
+
+        gamma_lo = max(gamma_bounds[0], gamma_map - gamma_range)
+        gamma_hi = min(gamma_bounds[1], gamma_map + gamma_range)
+        log10A_lo = max(log10A_bounds[0], log10A_map - log10A_range)
+        log10A_hi = min(log10A_bounds[1], log10A_map + log10A_range)
+
+    return jnp.array([gamma_map, log10A_map])
