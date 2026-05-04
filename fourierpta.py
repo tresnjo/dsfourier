@@ -74,7 +74,7 @@ def fouriermodel(psrs, rn_components, rn_init_params, fixed_wn=True, tnequad = F
     else:
         pslmodels = [ds.PulsarLikelihood([psr.residuals,
                                           ds.makegp_timing(psr, svd=True),
-                                          ds.makenoise_measurement(psr, ecorr=ecorr),
+                                          ds.makenoise_measurement(psr, ecorr=ecorr, tnequad = tnequad),
                                           ds.makegp_fourier(psr, ds.partial(powerlaw, **params),
                                                             rn_components, name='red_noise', T=Tspan)])
                      for psr, params in zip(psrs, params_list)]
