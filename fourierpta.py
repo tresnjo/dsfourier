@@ -42,7 +42,9 @@ def phi_sp(rho, f, df, powerlaw):
         
         return phi_inv_stacked, logdet_phi0
 
-def fouriermodel(psrs, rn_components, rn_init_params, fixed_wn=True, tnequad = False, ecorr=False, powerlaw=ds.flat_tail_powerlaw):
+def fouriermodel(psrs, rn_components, rn_init_params,
+                 fixed_wn=True, tnequad=False, ecorr=False,
+                 powerlaw=ds.flat_tail_powerlaw, residuals=None):
 
     Tspan = ds.getspan(psrs)
 
@@ -64,20 +66,30 @@ def fouriermodel(psrs, rn_components, rn_init_params, fixed_wn=True, tnequad = F
             raise ValueError(
                 f"Pulsar {i}: {powerlaw.__name__} expects params {expected_params} but got {list(params.keys())}")
 
-    if fixed_wn:
-        pslmodels = [ds.PulsarLikelihood([psr.residuals,
-                                          ds.makegp_timing(psr, svd=True),
-                                          ds.makenoise_measurement(psr, noisedict=psr.noisedict, tnequad = tnequad, ecorr=ecorr),
-                                          ds.makegp_fourier(psr, ds.partial(powerlaw, **params),
-                                                            rn_components, name='red_noise', T=Tspan)])
-                     for psr, params in zip(psrs, params_list)]
+    # for replacing residuals of psr obj.
+    if residuals is None:
+        residuals_list = [psr.residuals for psr in psrs]
+    elif not hasattr(residuals, '__len__'):
+        residuals_list = [residuals] * len(psrs)
+    elif len(residuals) == len(psrs):
+        residuals_list = residuals
     else:
-        pslmodels = [ds.PulsarLikelihood([psr.residuals,
+        raise ValueError(f"({len(residuals)}) is not matching number of pulsars ({len(psrs)})")
+
+    if fixed_wn:
+        pslmodels = [ds.PulsarLikelihood([res,
                                           ds.makegp_timing(psr, svd=True),
-                                          ds.makenoise_measurement(psr, ecorr=ecorr, tnequad = tnequad),
+                                          ds.makenoise_measurement(psr, noisedict=psr.noisedict, tnequad=tnequad, ecorr=ecorr),
                                           ds.makegp_fourier(psr, ds.partial(powerlaw, **params),
                                                             rn_components, name='red_noise', T=Tspan)])
-                     for psr, params in zip(psrs, params_list)]
+                     for psr, params, res in zip(psrs, params_list, residuals_list)]
+    else:
+        pslmodels = [ds.PulsarLikelihood([res,
+                                          ds.makegp_timing(psr, svd=True),
+                                          ds.makenoise_measurement(psr, ecorr=ecorr, tequad=tnequad),
+                                          ds.makegp_fourier(psr, ds.partial(powerlaw, **params),
+                                                            rn_components, name='red_noise', T=Tspan)])
+                     for psr, params, res in zip(psrs, params_list, residuals_list)]
 
     return pslmodels
 
