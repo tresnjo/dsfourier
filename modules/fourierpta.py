@@ -304,7 +304,11 @@ def log_fourier_likelihood_batched(rho, b, phi_func, TtNT, log_const0):
 #### Joint Fourier likelihoods ####
 
 def log_fourier_joint(rho, xi, b, phi_func, TtNT, log_const0, n2):
-
+    """
+    Joint (xi, eta) sampler corresponding to equation (22) in vvh25
+    
+    Returns likelihood evaluation and Fourier coefficients assuming eta-dependent decentering.
+    """
     phi_inv, logdet_phi = phi_func(rho)
     Sigma_inv = TtNT + phi_inv
     L_sinv = jnp.linalg.cholesky(Sigma_inv)
@@ -325,6 +329,12 @@ def log_fourier_joint(rho, xi, b, phi_func, TtNT, log_const0, n2):
 
 
 def log_fourier_joint_batched(rho, xi, b, phi_func, TtNT, log_const0, n2):
+    
+    """
+    Joint (xi, eta) sampler corresponding to equation (22) in vvh25. Allows for batching over pulsars.
+    
+    Returns likelihood evaluation and Fourier coefficients assuming eta-dependent decentering.
+    """
 
     phi_inv_diags, logdet_phi = phi_func(rho)
     sigma_inv = TtNT + jax.vmap(jnp.diag)(phi_inv_diags)
