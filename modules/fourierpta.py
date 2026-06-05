@@ -296,64 +296,38 @@ def log_fourier_likelihood_batched(rho, b, phi_func, TtNT, log_const0):
 
     log_det_sigma = -2.0 * jnp.sum(jax.vmap(lambda L: jnp.sum(jnp.log(jnp.diag(L))))(L_inv))
 
-    mu = jax.vmap(lambda L, bv: jsp.linalg.cho_solve((L, True), bv))(L_inv, b)
+    mu = jax.vmap(lambda L_p, b_p: jsp.linalg.cho_solve((L_p, True), b_p))(L_inv, b)
     quad_b = jnp.sum(jax.vmap(jnp.dot)(b, mu))
 
     return log_const0 + 0.5 * quad_b + 0.5 * log_det_sigma - 0.5 * logdet_phi
 
 #### Joint Fourier likelihoods ####
 
-def log_fourier_joint(rho, xi, b, phi_func, TtNT, log_const0):
-    """
-    Joint (xi, eta) sampler corresponding to equation (22) in vvh25
-    
-    Returns likelihood evaluation and Fourier coefficients assuming eta-dependent decentering
-    and brings xi to standard-normal EXACTLY.
-    """
-    
-    phi_inv, logdet_phi = phi_func(rho)
-    Sigma_inv = TtNT + phi_inv
-    L_sinv = jnp.linalg.cholesky(Sigma_inv)
-    
-    # solves for ahat = Sigma @ Sigma_0^{-1} @ ahat0 = Sigma @ b
-    ahat = jsp.linalg.cho_solve((L_sinv, True), b)
-    a = ahat + jsp.linalg.solve_triangular(L_sinv.T, xi, lower=False)
 
-    # likelihood eval.
-    quad_b = b @ ahat
-    log_det_L = -jnp.sum(jnp.log(jnp.diag(L_sinv)))
-    logL = 0.5 * quad_b - 0.5 * logdet_phi + log_const0 + log_det_L
-    return logL, a
-
-
-def log_fourier_joint_batched(rho, xi, b, phi_func, TtNT, log_const0):
-    
+def log_fourier_joint_batched(rho, xi, b, phi_func, TtNT):
+      
     """
     Joint (xi, eta) sampler corresponding to equation (22) in vvh25. Allows for batching over pulsars.
-    Useful for CURN.
-    
-    Returns likelihood evaluation and Fourier coefficients assuming eta-dependent decentering
-    and brings xi to standard-normal EXACTLY.
+    Used for CURN.
     """
-
+    
     phi_inv_diags, logdet_phi = phi_func(rho)
     sigma_inv = TtNT + jax.vmap(jnp.diag)(phi_inv_diags)
     L_sinv = jax.vmap(jnp.linalg.cholesky)(sigma_inv)
-    ahat = jax.vmap(lambda L, bv: jsp.linalg.cho_solve((L, True), bv))(L_sinv, b)
-    quad_b = jnp.sum(jax.vmap(jnp.dot)(b, ahat))
-    
-    # decentering
+
+    ahat = jax.vmap(lambda L_p, b_p: jsp.linalg.cho_solve((L_p, True), b_p))(L_sinv, b)
     a = ahat + jax.vmap(lambda L, xis: jsp.linalg.solve_triangular(L.T, xis, lower=False))(L_sinv, xi)
 
-    # likelihood eval.
+    quad_a = jnp.sum(jax.vmap(lambda sinv_p, a_p: a_p @ sinv_p @ a_p)(sigma_inv, a))
+    linear_a = jnp.sum(jax.vmap(jnp.dot)(b, a))
     log_det_L = -jnp.sum(jax.vmap(lambda L: jnp.sum(jnp.log(jnp.diag(L))))(L_sinv))
-    logL = 0.5 * quad_b - 0.5 * logdet_phi + log_const0 + log_det_L
+
+    logL = -0.5 * quad_a + linear_a + log_det_L - 0.5 * logdet_phi 
     return logL, a
 
 
-
 def log_jointFourierHD_dCURN(rho, xi, b, b_p, phi_hd_func, TtNT, n2_block, npsr):
-
+    
     '''
     Joint (xi, eta) sampler corresponding to equation (22) in vvh25 for HD.
      
@@ -361,39 +335,27 @@ def log_jointFourierHD_dCURN(rho, xi, b, b_p, phi_hd_func, TtNT, n2_block, npsr)
     which allows for batching across pulsars. 
     
     '''
-    # HD contribution 
+    
     phi_inv_hd, logdet_phi = phi_hd_func(rho)
     Sigma_inv = TtNT + phi_inv_hd
-    L_sinv = jnp.linalg.cholesky(Sigma_inv)
-    ahat = jsp.linalg.cho_solve((L_sinv, True), b)
-    quad_b = b @ ahat # corresponds to ahat^T Sigma^{-1} ahat
 
-    # CURN part can be extracted from block-diagonal blocks
-    # see phi_hd under spectral_covs.py
+    # CURN decentering
     Sigma_inv_CURN = jnp.diagonal(Sigma_inv.reshape(npsr, n2_block, npsr, n2_block), axis1=0, axis2=2).transpose(2, 0, 1)
-
-    # now the decentering is performed via CURN (batched over pulsars, subscript p)
     L_sinv_CURN = jax.vmap(jnp.linalg.cholesky)(Sigma_inv_CURN)
-    #Sigma_CURN  = jax.vmap(lambda L: jsp.linalg.cho_solve((L, True), jnp.eye(n2_block)))(L_sinv_CURN)
-    #L_CURN = jax.vmap(jnp.linalg.cholesky)(Sigma_CURN)
-    ahat_CURN_p = jax.vmap(lambda L, bv: jsp.linalg.cho_solve((L, True), bv))(L_sinv_CURN, b_p)
-
-    # decentering transf.
     xi_p = xi.reshape(npsr, n2_block)
-    ahat_CURN_p = jax.vmap(lambda L, bv: jsp.linalg.cho_solve((L, True), bv))(L_sinv_CURN, b_p)
-    a_p = ahat_CURN_p + jax.vmap(lambda L, xis: jsp.linalg.solve_triangular(L.T, xis, lower=False))(L_sinv_CURN, xi_p)
-    a = a_p.reshape(-1)
-
+    
+    ahat_p = jax.vmap(lambda L, bs: jsp.linalg.cho_solve((L, True), bs))(L_sinv_CURN, b_p)
+    a = (ahat_p + jax.vmap(lambda L_p, xis: jsp.linalg.solve_triangular(L_p.T, xis, lower=False))(L_sinv_CURN, xi_p)).reshape(-1)
+        
     # Jacobian for decentering transf.
-    logdet_L_CURN = logdet_L_CURN = -jnp.sum(jnp.log(jax.vmap(jnp.diag)(L_sinv_CURN))) 
+    logdet_L_CURN = -jnp.sum(jnp.log(jax.vmap(jnp.diag)(L_sinv_CURN)))
     
-    # xi-contribution (equivalent to (xi-xihat_L)Sigma_L^{-1}(xi-xihat_L) as in thesis)
-    quad_xi_sqrt = L_sinv.T @ (a - ahat)
-    quad_xi = quad_xi_sqrt @ quad_xi_sqrt
-    
-    # likelihood eval.
-    logL = 0.5 * quad_b - 0.5 * logdet_phi + logdet_L_CURN - 0.5 * quad_xi
+    quad_a = a @ Sigma_inv @ a
+    linear_a = a @ b # = a^T Sigma^{-1} ahat = a^T \Sigma^{-1} \Sigma Sigma_0^{-1} ahat0 = a^T b
+
+    logL = -0.5 * quad_a + linear_a + logdet_L_CURN - 0.5 * logdet_phi 
     return logL, a
+
 
 
 #### Step 1 functions ####
@@ -707,7 +669,8 @@ def run_step2_SPNA(summaries, psrs, phi_func, priordict,
 
     # Fourier basis (shared across pulsars)
     f, df, _ = signals.fourierbasis(psrs[0], components, T=Tspan)
-
+    
+    n = len(psrs)
     phi_func_list = phi_func if isinstance(phi_func, list) else [phi_func] * n
     
     all_samples = {}
@@ -756,7 +719,7 @@ def run_step2_SPNA(summaries, psrs, phi_func, priordict,
 def run_step2_crn(summaries, psrs, commongp, curngp, crn_components, priordict,
                   components=None, Tspan=None, n_warmup=1000, n_samples=3000, rng_key=0):
     """
-    Joint step-2 sampler for CURN process (or any other common process without pulsar-correlations)
+    Step-2 sampler for CURN using marginalized Fourier PTA likelihood.
     
     Returns numpyro samples. 
     """
@@ -791,6 +754,7 @@ def run_step2_crn(summaries, psrs, commongp, curngp, crn_components, priordict,
         for rn_name, size, rng in rn_params:
             d = dist.Uniform(*rng)
             rho[rn_name] = numpyro.sample(rn_name, d.expand([size]) if size > 1 else d)
+            
         numpyro.factor("logL", log_fourier_likelihood_batched(
             rho=rho, b=b, phi_func=phi_func, TtNT=TtNT, log_const0=log_const0))
 
@@ -819,7 +783,7 @@ def run_step2_crn(summaries, psrs, commongp, curngp, crn_components, priordict,
 def run_step2_hd(summaries, psrs, commongp, hdgp, gw_components, priordict,
                  components=None, Tspan=None, n_warmup=1000, n_samples=3000, rng_key=0):
     """
-    Joint step-2 sampler for HD process.
+    Step-2 sampler for HD using marginalized Fourier PTA likelihood.
     
     Returns numpyro samples.
     """
@@ -839,8 +803,6 @@ def run_step2_hd(summaries, psrs, commongp, hdgp, gw_components, priordict,
     b = jnp.concatenate([s.b0 for s in summaries])
     TtNT = jsp.linalg.block_diag(*[s.TtNT for s in summaries])
     log_const0 = sum(s.log_const0 for s in summaries)
-
-    # common RN with HD
     getN_common, getN_hd = commongp.Phi.getN, hdgp.Phi.getN
     all_params = getN_common.params + getN_hd.params
 
@@ -858,9 +820,9 @@ def run_step2_hd(summaries, psrs, commongp, hdgp, gw_components, priordict,
         for rn_name, size, rng in rn_params:
             d = dist.Uniform(*rng)
             rho[rn_name] = numpyro.sample(rn_name, d.expand([size]) if size > 1 else d)
-        # NOTE: not using batched fourierlikelihood here
-        numpyro.factor("logL", log_fourier_likelihood(
-            rho=rho, b=b, phi_func=phi_func, TtNT=TtNT, log_const0=log_const0))
+
+        numpyro.factor("logL", log_fourier_likelihood(rho=rho, b=b, phi_func=phi_func, 
+                                    TtNT=TtNT, log_const0=log_const0))
 
     # setting init_params for numpyro model
     eta0_lookup = {k: v for s in summaries for k, v in s.eta0.items()}
@@ -883,160 +845,17 @@ def run_step2_hd(summaries, psrs, commongp, hdgp, gw_components, priordict,
     sampler.print_summary()
     return samples
 
-#### Joint samplers ####
-
-def run_step2_crn_joint(summaries, psrs, commongp, curngp, crn_components, priordict,
-                        components=None, n_warmup=1000, n_samples=3000, rng_key=0):
+#### Joint sampler ####
+def run_step2_joint(summaries, psrs, commongp, priordict, 
+                    curngp = None, crn_components= None,
+                    globalgp = None, gw_components = None,
+                    components = None, n_warmup=1000, n_samples=3000, rng_key=0):
     """
-    Joint (xi, eta) sampler corresponding to equation (22) in vvh25 and equation (4.42) in theiss,
-    specializing to CURN model. Uses eta-dependent decentering a = ahat(eta) + L_sigma(eta) @ xi 
-    where ahat(eta) = Sigma(eta) Sigma0^{-1} ahat0 and L_sigma(eta) = chol(Sigma(eta)). 
-    See equation (4.40)-(4.41) of thesis.
-        
+    Step-2 sampler for hyperparameters together with coefficient sampling
+    using CURN decentering (for globalgp) and pulsar batching for curngp.
     """
-    rng_key = jax.random.key(rng_key)
-
-    for s in summaries:
-        if not s.is_ready_for_step2:
-            raise ValueError(f"{s.name} is not ready for step 2.")
-
-    npsr = len(psrs)
-    if components is None:
-        components = summaries[0].n_coeff // 2
-        
-    n2 = 2*components
-
-    # reshaping to prepare zero quantities for joint model
-    b = jnp.concatenate([s.b0 for s in summaries]).reshape(npsr, n2)
-    TtNT = jnp.stack([s.TtNT for s in summaries]).reshape(npsr,n2, n2)
-    log_const0 = sum(s.log_const0 for s in summaries)
-
-    # TODO: fix the common s.t. it sets powerlaw on pulsar-by-pulsar basis?
-    getN_common, getN_curn = commongp.Phi.getN, curngp.Phi.getN
-    all_params = getN_common.params + getN_curn.params
-    phi_func = jax.jit(functools.partial(phi_crn, crn_components=crn_components,
-                                         getN_common=getN_common, getN_curn=getN_curn))
-
-    rn_params = [(p, 1, _lookup_prior(p, priordict)) for p in all_params]
-
-    def model():
-        rho = {}
-        for rn_name, size, rng in rn_params:
-            d = dist.Uniform(*rng)
-            rho[rn_name] = numpyro.sample(rn_name, d.expand([size]) if size > 1 else d)
-        xi = numpyro.sample("xi", dist.Normal(jnp.zeros((npsr, n2)),
-                                              jnp.ones((npsr, n2))))
-        logL, a = log_fourier_joint_batched(rho, xi, b, phi_func, TtNT, log_const0)
-        numpyro.deterministic("a", a)
-        numpyro.factor("logL", logL)
-
-    # setting init_params for numpyro model
-    eta0_lookup = {k: v for s in summaries for k, v in s.eta0.items()}
-
-    init_params = {}
-    for rn_name, size, (lo, hi) in rn_params:
-        match = (next((v for k, v in eta0_lookup.items() if rn_name.endswith(k)), None)
-                 if 'red_noise' in rn_name else None)
-        if match is not None:
-            init_params[rn_name] = jnp.asarray(match)
-        else:
-            mid = 0.5 * (lo + hi)
-            init_params[rn_name] = jnp.full(size, mid) if size > 1 else jnp.array(mid)
     
-    rng_key, xi_key = jax.random.split(rng_key)
-    init_params["xi"] = jax.random.normal(xi_key, (npsr, 2*components))
-
-    # creating kernel and running sampler
-    kernel = infer.NUTS(model, init_strategy=infer.init_to_value(values=init_params))
-    sampler = infer.MCMC(kernel, num_warmup=n_warmup, num_samples=n_samples, progress_bar=True)
-    sampler.run(rng_key)
-    samples = sampler.get_samples()
-    sampler.print_summary()
-    return samples
-
-
-def run_step2_hd_joint(summaries, psrs, commongp, hdgp, gw_components, priordict,
-                       components=None, n_warmup=1000, n_samples=3000, rng_key=0):
-    """
-    Joint (xi, eta) sampler corresponding to equation (22) in vvh25 and equation (4.42) in theiss,
-    specializing to HD model. Uses eta-dependent decentering a = ahat(eta) + L_sigma(eta) @ xi 
-    where ahat(eta) = Sigma(eta) Sigma0^{-1} ahat0 and L_sigma(eta) = chol(Sigma(eta)). 
-    See equation (4.40)-(4.41) of thesis.
-        
-    """
-    rng_key = jax.random.key(rng_key)
-
-    for s in summaries:
-        if not s.is_ready_for_step2:
-            raise ValueError(f"{s.name} is not ready for step 2.")
-
-    npsr = len(psrs)
-    if components is None:
-        components = summaries[0].n_coeff // 2
     
-    n2 = 2*components
-    ndimtot = npsr * n2
-    
-    # can no longer batch over pulsars...
-    b = jnp.concatenate([s.b0 for s in summaries])               
-    TtNT = jsp.linalg.block_diag(*[s.TtNT for s in summaries])    
-    log_const0 = sum(s.log_const0 for s in summaries)
-    
-    # TODO: fix the common s.t. it sets powerlaw on pulsar-by-pulsar basis?
-    getN_common, getN_hd = commongp.Phi.getN, hdgp.Phi.getN
-    all_params = getN_common.params + getN_hd.params
-    phi_func = jax.jit(functools.partial(phi_hd, rn_components=components,
-                                         gw_components=gw_components,
-                                         getN_common=getN_common, getN_hd=getN_hd,
-                                         npsr=npsr))
-
-    rn_params = [(p, 1, _lookup_prior(p, priordict)) for p in all_params]
-
-    def model():
-        rho = {}
-        for rn_name, size, rng in rn_params:
-            d = dist.Uniform(*rng)
-            rho[rn_name] = numpyro.sample(rn_name, d.expand([size]) if size > 1 else d)
-        xi = numpyro.sample("xi", dist.Normal(jnp.zeros(ndimtot), jnp.ones(ndimtot)))
-        logL, a = log_fourier_joint(rho, xi, b, phi_func, TtNT, log_const0)
-        numpyro.deterministic("a", a)
-        numpyro.factor("logL", logL)
-        
-    # setting init_params for numpyro model
-    eta0_lookup = {k: v for s in summaries for k, v in s.eta0.items()}
-
-    init_params = {}
-    for rn_name, size, (lo, hi) in rn_params:
-        match = (next((v for k, v in eta0_lookup.items() if rn_name.endswith(k)), None)
-                 if 'red_noise' in rn_name else None)
-        if match is not None:
-            init_params[rn_name] = jnp.asarray(match)
-        else:
-            mid = 0.5 * (lo + hi)
-            init_params[rn_name] = jnp.full(size, mid) if size > 1 else jnp.array(mid)
-    
-    rng_key, xi_key = jax.random.split(rng_key)
-    init_params["xi"] = jax.random.normal(xi_key, (ndimtot,))
-
-    # creating kernel and running sampler
-    kernel = infer.NUTS(model, init_strategy=infer.init_to_value(values=init_params))
-    sampler = infer.MCMC(kernel, num_warmup=n_warmup, num_samples=n_samples, progress_bar=True)
-    sampler.run(rng_key)
-    samples = sampler.get_samples()
-    sampler.print_summary()
-    return samples
-
-
-def run_step2_hd_joint_CURN_decentering(summaries, psrs, commongp, hdgp,
-                                        gw_components, priordict,
-                                        components=None, n_warmup=1000, n_samples=3000,
-                                        rng_key=0):
-    
-    """ 
-    Coefficient sampler together with HD process using CURN-based decentering
-    which allows for batching over pulsars.
-    
-    """
     rng_key = jax.random.key(rng_key)
     for s in summaries:
         if not s.is_ready_for_step2:
@@ -1045,32 +864,68 @@ def run_step2_hd_joint_CURN_decentering(summaries, psrs, commongp, hdgp,
     npsr = len(psrs)
     if components is None:
         components = summaries[0].n_coeff // 2
-    n2 = 2 * components
-    ndim = npsr * n2
+    n2_block = 2 * components
+    ndim = npsr * n2_block
+    getN_common = commongp.Phi.getN
 
-    b = jnp.concatenate([s.b0 for s in summaries])
-    b_p = b.reshape(npsr, n2)
-    TtNT = jsp.linalg.block_diag(*[s.TtNT for s in summaries])
+    if globalgp is not None:
+        
+        getN_global = globalgp.Phi.getN
+        all_params = getN_common.params + getN_global.params
+        
+        phi_func = jax.jit(functools.partial(phi_hd, rn_components=components,
+                                             gw_components=gw_components,
+                                             getN_common=getN_common,
+                                             getN_hd=getN_global, npsr=npsr))
+        
+        b = jnp.concatenate([s.b0 for s in summaries])
+        b_p = b.reshape(npsr, n2_block)
+        TtNT = jsp.linalg.block_diag(*[s.TtNT for s in summaries])
+        
+        xi_shape = (ndim,)
 
-    getN_common, getN_hd = commongp.Phi.getN, hdgp.Phi.getN
-    all_params = getN_common.params + getN_hd.params
-    phi_hd_func = jax.jit(functools.partial(phi_hd, rn_components=components,
-                                            gw_components=gw_components,
-                                            getN_common=getN_common, getN_hd=getN_hd,
-                                            npsr=npsr))
+        def model():
+            
+            rho = {}
+            for rn_name, size, rng in rn_params:
+                d = dist.Uniform(*rng)
+                rho[rn_name] = numpyro.sample(rn_name, d.expand([size]) if size > 1 else d)
+                
+            xi = numpyro.sample("xi", dist.Normal(jnp.zeros(xi_shape), jnp.ones(xi_shape)))
+            logL, a = log_jointFourierHD_dCURN(rho, xi, b, b_p, phi_func, TtNT, n2_block, npsr)
+            logL = logL + 0.5 * xi.T @ xi
+            
+            numpyro.deterministic("a", a)
+            numpyro.factor("logL", logL)
+
+    else:
+        
+        getN_crn = curngp.Phi.getN
+        all_params = getN_common.params + getN_crn.params
+                        
+        phi_func = functools.partial(phi_crn, crn_components=crn_components,
+                                     getN_common=getN_common,
+                                     getN_curn=getN_crn)
+        
+        b = jnp.concatenate([s.b0 for s in summaries]).reshape(npsr, n2_block)
+        TtNT = jnp.stack([s.TtNT for s in summaries])
+        xi_shape = (npsr, n2_block)
+
+        def model():
+            
+            rho = {}
+            for rn_name, size, rng in rn_params:
+                d = dist.Uniform(*rng)
+                rho[rn_name] = numpyro.sample(rn_name, d.expand([size]) if size > 1 else d)
+                
+            xi = numpyro.sample("xi", dist.Normal(jnp.zeros(xi_shape), jnp.ones(xi_shape)))
+            logL, a = log_fourier_joint_batched(rho, xi, b, phi_func, TtNT)
+            logL = logL + 0.5 * jnp.sum(xi ** 2)
+            
+            numpyro.deterministic("a", a)
+            numpyro.factor("logL", logL)
 
     rn_params = [(p, 1, _lookup_prior(p, priordict)) for p in all_params]
-
-    def model():
-        rho = {}
-        for rn_name, size, rng in rn_params:
-            d = dist.Uniform(*rng)
-            rho[rn_name] = numpyro.sample(rn_name, d.expand([size]) if size > 1 else d)
-        xi = numpyro.sample("xi", dist.Normal(jnp.zeros(ndim), jnp.ones(ndim)))
-        logL, a = log_jointFourierHD_dCURN(rho, xi, b, b_p, phi_hd_func, TtNT, n2, npsr)
-        logL = logL + 0.5 * jnp.dot(xi, xi)
-        numpyro.deterministic("a", a)
-        numpyro.factor("logL", logL)
 
     eta0_lookup = {k: v for s in summaries for k, v in s.eta0.items()}
     init_params = {}
@@ -1079,14 +934,13 @@ def run_step2_hd_joint_CURN_decentering(summaries, psrs, commongp, hdgp,
                  if 'red_noise' in rn_name else None)
         init_params[rn_name] = (jnp.asarray(match) if match is not None
                                 else (jnp.full(size, 0.5*(lo+hi)) if size > 1 else jnp.array(0.5*(lo+hi))))
-    
-    rng_key, xi_key = jax.random.split(rng_key)
-    init_params["xi"] = jax.random.normal(xi_key, (ndim,))
 
+    rng_key, xi_key = jax.random.split(rng_key)
+    init_params["xi"] = jax.random.normal(xi_key, xi_shape)
+    
     kernel = infer.NUTS(model, init_strategy=infer.init_to_value(values=init_params))
     sampler = infer.MCMC(kernel, num_warmup=n_warmup, num_samples=n_samples, progress_bar=True)
     sampler.run(rng_key)
     samples = sampler.get_samples()
     sampler.print_summary()
     return samples
-
