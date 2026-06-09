@@ -592,13 +592,12 @@ def run_step1_model(summaries, priordict, noisedict_list = None,
     
     print("Computing zero quantities...")
     theta_samples_list = [s.theta_samples for s in summaries]
-    compute_zero_quantities(summaries, noisedict_list = noisedict_list, theta_samples_list=theta_samples_list)
+    if eval_zero_quantities:
+        compute_zero_quantities(summaries, noisedict_list = noisedict_list, theta_samples_list=theta_samples_list)
 
-def build_fourier_psr_summaries(psrs, eta0_list,
-                           powerlaw, components: int = 30,
-                           noisedict_list=None,
-                           ecorr: bool = True,
-                           Tspan=None):
+def build_fourier_psr_summaries(psrs, eta0_list, powerlaw, components = 30,
+                           noisedict_list=None,ecorr = True,Tspan=None,
+                           psr_class_obj = PulsarFourierSummary):
     
     """ Builds and returns the PulsarFourierSummary objects for each pulsar using the
     regularizer eta0 which can either be a single dict and is then shared across all pulsars, or 
@@ -638,7 +637,7 @@ def build_fourier_psr_summaries(psrs, eta0_list,
         sigma0r  = jsp.linalg.cho_solve((cf_inv[0], True),jnp.eye(cf_inv[0].shape[0]))
         L0r = jsp.linalg.cholesky(sigma0r, lower=True)
 
-        summaries.append(PulsarFourierSummary(name = psr.name,
+        summaries.append(psr_class_obj(name = psr.name,
             psl  = psl, eta0 = eta0,
             phi0_inv = phi0_inv, logdet_phi0 = float(logdet_phi0),
             ahat0r = ahat0r, L0r = L0r))

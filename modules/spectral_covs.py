@@ -4,14 +4,15 @@
 import jax
 import jax.numpy as jnp
 import jax.scipy as jsp
+import discovery as ds
 
-
+    
 def phi_single_pulsar(rho, f, df, powerlaw):
     
-    phi1         = powerlaw(f, df, **rho)
+    phi1 = powerlaw(f, df, **rho)
     phi_inv_diag = 1.0 / phi1
-    logdet_phi   = jnp.sum(jnp.log(phi1))
-    phi_inv      = jnp.diag(phi_inv_diag)
+    logdet_phi = jnp.sum(jnp.log(phi1))
+    phi_inv = jnp.diag(phi_inv_diag)
 
     return phi_inv, logdet_phi
 

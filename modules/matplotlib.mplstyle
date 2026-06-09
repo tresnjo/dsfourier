@@ -1,0 +1,36 @@
+text.usetex: True
+font.family: serif
+font.serif: Palatino
+text.latex.preamble: \usepackage{mathpazo}\usepackage{bm}\usepackage{amsmath}
+
+figure.figsize: 8, 5
+figure.dpi: 120
+savefig.dpi: 300
+
+font.size: 14
+axes.titlesize: 18
+axes.labelsize: 18
+
+xtick.labelsize: 14
+ytick.labelsize: 14
+
+legend.fontsize: 13
+legend.frameon: False
+
+xtick.direction: in
+ytick.direction: in
+xtick.top: True
+ytick.right: True
+
+xtick.minor.visible: True
+ytick.minor.visible: True
+
+xtick.major.size: 6
+ytick.major.size: 6
+xtick.minor.size: 3
+ytick.minor.size: 3
+
+axes.linewidth: 1.2
+lines.linewidth: 2.0
+
+axes.grid: False
