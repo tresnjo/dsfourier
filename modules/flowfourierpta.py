@@ -176,7 +176,10 @@ def fit_flow_to_samples(summary, rng_key, flow_architecture,
     trained_flow, _ = fit_to_data(train_key,
         dist=flow, data=y_samples,
         learning_rate=learning_rate, max_epochs=max_epochs,
-        batch_size=batch_size)
+        batch_size=batch_size,
+        val_prop = 0.2,
+        max_patience = 100,                       
+        )
  
     summary.flow = trained_flow # populates the flow field in the summaries
     print(f"Finished flow-fit to pulsar {summary.name}.")
