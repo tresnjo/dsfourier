@@ -41,6 +41,10 @@ newdict = {'(.*_)?red_noise_coefficients\\(([0-9]*)\\)': [-100, 100],
 
 priordict_standard.update(newdict) # for flat-tail powerlaw spectrum
 
+def get_rn_slice(psl):
+        """Picks out Fourier coefficients from full coefficient vector"""
+        rn_key = [k for k in psl.N.index.keys() if 'red_noise' in k][0]
+        return psl.N.index[rn_key]
 
 @dataclasses.dataclass
 class FlowPulsarFourierSummary:
@@ -87,9 +91,7 @@ class FlowPulsarFourierSummary:
 
     @property
     def rn_slice(self):
-        """Picks out Fourier coefficients from full coefficient vector"""
-        rn_key = [k for k in self.psl.N.index.keys() if 'red_noise' in k][0]
-        return self.psl.N.index[rn_key]
+        return get_rn_slice(self.psl)
 
     @property
     def is_ready_for_step2(self):
@@ -167,9 +169,9 @@ def fit_flow_to_samples(summary, rng_key, flow_architecture,
         
         flow = masked_autoregressive_flow(flow_key,
             base_dist=StandardNormal((n_coeff,)),
-            flow_layers=2, nn_width=32, nn_depth=4,
-            invert=True)    # invert = True is needed for faster log_prob evaluations.
-                            # it is True by default. 
+            flow_layers=8, nn_width=32, nn_depth=4,
+            invert=True,) # invert = True is needed for faster log_prob evaluations.
+                            # it is True by default.   
     else:
         flow = flow_architecture(flow_key, n_coeff)
  
@@ -177,9 +179,8 @@ def fit_flow_to_samples(summary, rng_key, flow_architecture,
         dist=flow, data=y_samples,
         learning_rate=learning_rate, max_epochs=max_epochs,
         batch_size=batch_size,
-        val_prop = 0.2,
-        max_patience = 100,                       
-        )
+        max_patience = 100,
+        val_prop = 0.2, )
  
     summary.flow = trained_flow # populates the flow field in the summaries
     print(f"Finished flow-fit to pulsar {summary.name}.")
@@ -342,7 +343,7 @@ def run_step1_flow(summaries, priordict,
 #### Joint posteriors for flow-corrected result ####
 def log_fourier_joint_batched_flow_corrected(rho, xi, bf, phi_func, TtNTf,
                                              logL_flow_list, ahat_0r, ahat_f,
-                                             L_0, L_sigma_f):
+                                             L_0, L_sigma_f, log_gauss_normconst):
     
     
     """
@@ -369,17 +370,56 @@ def log_fourier_joint_batched_flow_corrected(rho, xi, bf, phi_func, TtNTf,
     # Gauss. approx to flow
     a_diff = a - ahat_f
     y_gauss = jax.vmap(lambda l, r: jsp.linalg.solve_triangular(l, r, lower=True))(L_sigma_f, a_diff)
-    log_p_gauss = -0.5 * jnp.sum(y_gauss ** 2)
+    log_p_gauss = -0.5 * jnp.sum(y_gauss ** 2) + log_gauss_normconst
 
     numpyro.deterministic("y_gauss", y_gauss)
-    numpyro.factor("flowCorrection", log_p_flow - log_p_gauss) 
+    
+    log_flow_diff = log_p_flow - log_p_gauss
+    numpyro.factor("flowCorrection", log_flow_diff) 
+    numpyro.deterministic("flow_normal_ratio", jnp.exp(log_flow_diff))
 
     return logL
 
 
+def log_fourier_joint_batched_flow_corrected_v2(rho, xi, bf, phi_func, TtNTf,
+                                             logL_flow_list, ahat_0,
+                                             L_0, log_gauss_normconst):
+    
+    
+    """
+    Reuses the joint_batched log-Fourier likelihood from fourierpta.py
+    except that all quantities previously labeled by subscript zero
+    are reinterprerted as flow quantities instead with the additional
+    non-Gaussian flow correction entering 
+    
+    """
+
+    # note that the a that is returned here is not unrolled
+    logL, a = log_fourier_joint_batched(rho, xi, bf, phi_func, TtNTf) # Valtolina Fourier likelihood
+    numpyro.deterministic("a", a)
+    
+    # non-Gaussian correction (our new result)
+    
+    # latent space transf.
+    a_diff = a - ahat_0
+    y = jax.vmap(lambda l, r: jsp.linalg.solve_triangular(l, r, lower=True))(L_0, a_diff)
+    numpyro.deterministic("y", y)
+
+    log_p_flow = jnp.sum(jnp.array([logL_flow_list[i](y[i])
+                                     for i in range(len(logL_flow_list))]))
+
+    log_p_gauss = -0.5 * jnp.sum(y ** 2) + log_gauss_normconst
+
+    log_flow_diff = log_p_flow - log_p_gauss
+    numpyro.factor("flowCorrection", log_flow_diff)
+    numpyro.deterministic("flow_normal_ratio", jnp.exp(log_flow_diff))
+
+    return logL
+
 def log_fourier_joint_dCURN_flow_corrected(rho, xi, bf, bf_p, phi_func, TtNTf,
                                              logL_flow_list, ahat_0r, ahat_f,
-                                             L_0, L_sigma_f, n2_block, npsr):
+                                             L_0, L_sigma_f, n2_block, npsr,
+                                             log_gauss_normconst):
     
     
     logL, a = log_jointFourierHD_dCURN(rho, xi, bf, bf_p, phi_func, TtNTf, n2_block, npsr)
@@ -393,15 +433,43 @@ def log_fourier_joint_dCURN_flow_corrected(rho, xi, bf, bf_p, phi_func, TtNTf,
 
     a_diff = a_tmp - ahat_f
     y_gauss = jax.vmap(lambda l, r: jsp.linalg.solve_triangular(l, r, lower=True))(L_sigma_f, a_diff)
-    log_p_gauss = -0.5 * jnp.sum(y_gauss ** 2)
+    log_p_gauss = -0.5 * jnp.sum(y_gauss ** 2) + log_gauss_normconst
     numpyro.deterministic("y_gauss", y_gauss)
 
-    numpyro.factor("flowCorrection", log_p_flow - log_p_gauss)
+    log_flow_diff =  log_p_flow - log_p_gauss
+    numpyro.factor("flowCorrection", log_flow_diff)
+    numpyro.deterministic("flow_normal_ratio", jnp.exp(log_flow_diff))
 
     return logL
 
+
+def log_fourier_joint_dCURN_flow_corrected_v2(rho, xi, bf, bf_p, phi_func, TtNTf,
+                                             logL_flow_list, ahat_0,
+                                             L_0, n2_block, npsr,
+                                             log_gauss_normconst):
+    
+    
+    logL, a = log_jointFourierHD_dCURN(rho, xi, bf, bf_p, phi_func, TtNTf, n2_block, npsr)
+    a_tmp = a.reshape(npsr, n2_block)
+    numpyro.deterministic("a", a_tmp)
+    
+    a_diff_0 = a_tmp - ahat_0
+    y = jax.vmap(lambda l, r: jsp.linalg.solve_triangular(l, r, lower=True))(L_0, a_diff_0)
+    log_p_flow = jnp.sum(jnp.array([logL_flow_list[i](y[i])
+                                     for i in range(len(logL_flow_list))]))
+
+    log_p_gauss = -0.5 * jnp.sum(y ** 2) + log_gauss_normconst
+
+    log_flow_diff = log_p_flow - log_p_gauss
+    numpyro.factor("flowCorrection", log_flow_diff)
+    numpyro.deterministic("flow_normal_ratio", jnp.exp(log_flow_diff))
+
+    return logL
+
+
 def log_fourier_joint_single_flow_corrected(rho, xi, bf, phi_func, TtNTf,
-                                             logL_flow_list, ahat_0r, ahat_f, L_0, L_sigma_f):
+                                             logL_flow_list, ahat_0r, ahat_f, L_0, L_sigma_f,
+                                             log_gauss_normconst):
 
     
     phi_inv, logdet_phi = phi_func(rho)
@@ -422,15 +490,48 @@ def log_fourier_joint_single_flow_corrected(rho, xi, bf, phi_func, TtNTf,
     # non-Gaussian correction
     a_diff_0 = a - ahat_0r  # we use the regularized conditional mean and Cholesky for the latent space transf.
     y = jsp.linalg.solve_triangular(L_0, a_diff_0, lower=True)
+    
     log_p_flow = logL_flow_list[0](y)
 
     a_diff = a - ahat_f
     y_gauss = jsp.linalg.solve_triangular(L_sigma_f, a_diff, lower=True)
-    log_p_gauss = -0.5 * jnp.sum(y_gauss ** 2)
+    log_p_gauss = -0.5 * jnp.sum(y_gauss ** 2) + log_gauss_normconst
 
     numpyro.deterministic("y", y)
     numpyro.deterministic("y_gauss", y_gauss)
-    numpyro.factor("flowCorrection", log_p_flow - log_p_gauss)
+    
+    log_flow_diff = log_p_flow - log_p_gauss
+    numpyro.factor("flowCorrection", log_flow_diff)
+    numpyro.deterministic("flow_normal_ratio", jnp.exp(log_flow_diff))
+    return logL, a
+
+def log_fourier_joint_single_flow_corrected_v2(rho, xi, bf, phi_func, TtNTf,
+                                             logL_flow_list, ahat_0, L_0,
+                                             log_gauss_normconst):
+
+    phi_inv, logdet_phi = phi_func(rho)
+    Sigma_inv = TtNTf + phi_inv
+    L_sinv = jnp.linalg.cholesky(Sigma_inv)
+
+    ahat = jsp.linalg.cho_solve((L_sinv, True), bf)
+    a = ahat + jsp.linalg.solve_triangular(L_sinv.T, xi, lower=False)
+
+    quad_a   = a @ Sigma_inv @ a
+    linear_a = bf @ a
+    log_det_L = -jnp.sum(jnp.log(jnp.diag(L_sinv)))
+
+    logL = -0.5 * quad_a + linear_a + log_det_L - 0.5 * logdet_phi
+
+    a_diff = a - ahat_0
+    y = jsp.linalg.solve_triangular(L_0, a_diff, lower=True)
+    numpyro.deterministic("y", y)
+
+    log_p_flow = logL_flow_list[0](y)
+    log_p_gauss = -0.5 * jnp.sum(y ** 2) + log_gauss_normconst
+
+    log_flow_diff = log_p_flow - log_p_gauss
+    numpyro.factor("flowCorrection", log_flow_diff)
+    numpyro.deterministic("flow_normal_ratio", jnp.exp(log_flow_diff))
 
     return logL, a
 
@@ -468,6 +569,9 @@ def run_step2_SPNA_flow_corrected(summaries, psrs, phi_func, priordict,
         log_const0 = s.log_const0
         xi_shape = (2*components,)
         
+        log_gauss_normconst = (-0.5 * float(s.L_f.shape[0]) * jnp.log(2 * jnp.pi)
+                               - jnp.sum(jnp.log(jnp.diag(s.L_f))))
+        
         psr_params = {}
         rn_params = []
         for eta_key, eta_val in s.eta0.items():
@@ -484,7 +588,8 @@ def run_step2_SPNA_flow_corrected(summaries, psrs, phi_func, priordict,
                   bf=bf, TtNTf=TtNTf, log_const0=log_const0,
                   logL_flow_list=logL_flow_list, ahat_0r=ahat_0r,
                   ahat_f=ahat_f, L_0=L_0, L_sigma_f=L_sigma_f,
-                  xi_shape=xi_shape):
+                  xi_shape=xi_shape,
+                  log_gauss_normconst=log_gauss_normconst):
 
             rho = {}
             for rn_name, size, rng in rn_params:
@@ -496,7 +601,8 @@ def run_step2_SPNA_flow_corrected(summaries, psrs, phi_func, priordict,
             logL, a = log_fourier_joint_single_flow_corrected(
                 rho=rho, xi=xi, bf=bf, phi_func=phi_func_i, TtNTf=TtNTf,
                 logL_flow_list=logL_flow_list, ahat_0r=ahat_0r,
-                ahat_f=ahat_f, L_0=L_0, L_sigma_f=L_sigma_f)
+                ahat_f=ahat_f, L_0=L_0, L_sigma_f=L_sigma_f,
+                log_gauss_normconst=log_gauss_normconst)
 
             numpyro.deterministic("a", a)
             numpyro.factor("logL", logL + log_const0 + 0.5 * jnp.sum(xi ** 2))
@@ -540,6 +646,11 @@ def run_step2_joint_flow_corrected(summaries, psrs, commongp, priordict,
     L_sigma_f  = jnp.stack([s.L_f for s in summaries])
     logL_flow_list = [lambda y, s=s: s.flow.log_prob(y) for s in summaries]
 
+
+    log_det_sigma_f = jnp.sum(jnp.array([jnp.sum(jnp.log(jnp.diag(s.L_f))) for s in summaries]))
+    n_total = float(sum(s.L_f.shape[0] for s in summaries))
+    log_gauss_normconst = -0.5 * n_total * jnp.log(2 * jnp.pi) - log_det_sigma_f
+
     if globalgp is not None:
 
         getN_global = globalgp.Phi.getN
@@ -563,7 +674,8 @@ def run_step2_joint_flow_corrected(summaries, psrs, commongp, priordict,
 
             xi = numpyro.sample("xi", dist.Normal(jnp.zeros(xi_shape), jnp.ones(xi_shape)))
             logL = log_fourier_joint_dCURN_flow_corrected(rho, xi, bf, bf_p, phi_func, TtNTf,
-                logL_flow_list, ahat_0r, ahat_f, L_0, L_sigma_f, n2_block, npsr)
+                logL_flow_list, ahat_0r, ahat_f, L_0, L_sigma_f, n2_block, npsr,
+                log_gauss_normconst)
             
             logL = logL + 0.5 * xi.T @ xi 
 
@@ -591,7 +703,7 @@ def run_step2_joint_flow_corrected(summaries, psrs, commongp, priordict,
             xi = numpyro.sample("xi", dist.Normal(jnp.zeros(xi_shape), jnp.ones(xi_shape)))
             logL = log_fourier_joint_batched_flow_corrected(
                 rho, xi, bf, phi_func, TtNTf,
-                logL_flow_list, ahat_0r, ahat_f, L_0, L_sigma_f)
+                logL_flow_list, ahat_0r, ahat_f, L_0, L_sigma_f, log_gauss_normconst)
             
             logL = logL + 0.5 * jnp.sum(xi ** 2) 
 

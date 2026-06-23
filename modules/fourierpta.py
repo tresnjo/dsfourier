@@ -28,9 +28,7 @@ from .. import priordict_standard
 newdict = {'(.*_)?red_noise_coefficients\\(([0-9]*)\\)': [-100, 100],
            '(.*_)?log10k': [-9.0, -4.0]}
 
-priordict_standard.update({
-    '(.*_)?red_noise_coefficients\\(([0-9]*)\\)': [-100, 100], 
-    '(.*_)?log10k': [-9.0, -4.0]}) # for flat-tail powerlaw spectrum
+priordict_standard.update(newdict) # for flat-tail powerlaw spectrum
 
 
 @dataclasses.dataclass
@@ -336,6 +334,7 @@ def log_jointFourierHD_dCURN(rho, xi, b, b_p, phi_hd_func, TtNT, n2_block, npsr)
     
     '''
     
+    
     phi_inv_hd, logdet_phi = phi_hd_func(rho)
     Sigma_inv = TtNT + phi_inv_hd
 
@@ -592,8 +591,7 @@ def run_step1_model(summaries, priordict, noisedict_list = None,
     
     print("Computing zero quantities...")
     theta_samples_list = [s.theta_samples for s in summaries]
-    if eval_zero_quantities:
-        compute_zero_quantities(summaries, noisedict_list = noisedict_list, theta_samples_list=theta_samples_list)
+    compute_zero_quantities(summaries, noisedict_list = noisedict_list, theta_samples_list=theta_samples_list)
 
 def build_fourier_psr_summaries(psrs, eta0_list, powerlaw, components = 30,
                            noisedict_list=None,ecorr = True,Tspan=None,
@@ -932,7 +930,7 @@ def run_step2_joint(summaries, psrs, commongp, priordict,
         match = (next((v for k, v in eta0_lookup.items() if rn_name.endswith(k)), None)
                  if 'red_noise' in rn_name else None)
         init_params[rn_name] = (jnp.asarray(match) if match is not None
-                                else (jnp.full(size, 0.5*(lo+hi)) if size > 1 else jnp.array(0.5*(lo+hi))))
+                                else (jnp.full(size, 0.5*(lo+hi)) if size > 1 else jnp.array(0.90*(lo+hi))))
 
     rng_key, xi_key = jax.random.split(rng_key)
     init_params["xi"] = jax.random.normal(xi_key, xi_shape)
